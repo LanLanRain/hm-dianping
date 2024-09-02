@@ -1,5 +1,6 @@
 package com.hmdp.service.impl;
 
+import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -14,8 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 import javax.annotation.Resource;
 import java.util.concurrent.TimeUnit;
 
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_TTL;
+import static com.hmdp.utils.RedisConstants.*;
 
 @Service
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
@@ -31,30 +31,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
      */
     @Override
     public Result queryById(Long id) {
-        // 生成缓存用的键
-        String key = CACHE_SHOP_KEY + id;
-        // 尝试从Redis缓存中获取店铺信息的JSON字符串
-        String shopJson = stringRedisTemplate.opsForValue().get(key);
-
-        // 如果缓存中存在该店铺信息
-        if (StrUtil.isNotBlank(shopJson)) {
-            // 将JSON字符串转换为Shop对象
-            Shop shop = JSONUtil.toBean(shopJson, Shop.class);
-            // 直接返回缓存中的店铺信息
-            return Result.ok(shop);
-        }
-
-        // 如果缓存中没有，那么从数据库中查询店铺信息
-        Shop shop = getById(id);
-        // 如果数据库中也不存在该店铺信息
-        if (shop == null) {
-            // 返回失败结果，说明店铺不存在
-            return Result.fail("店铺不存在");
-        }
-
-        // 将数据库中查询到的店铺信息存入Redis缓存
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
-        // 返回数据库中的店铺信息
+        Shop shop = queryWithMutex(id);
         return Result.ok(shop);
     }
 
@@ -86,4 +63,65 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         return Result.ok();
     }
 
+    private boolean tryLock(String key) {
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    private void unLock(String key) {
+        stringRedisTemplate.delete(key);
+    }
+
+    /**
+     * 根据ID查询店铺信息，使用互斥锁机制防止缓存击穿
+     * 当缓存中不存在对应ID的店铺信息时，通过加锁避免多个线程同时查询数据库
+     * 只有获取锁成功的线程会进行数据库查询，其他线程将尝试等待或直接返回错误信息
+     *
+     * @param id 店铺ID
+     * @return 店铺信息，如果缓存和数据库中都不存在，则返回null
+     */
+    public Shop queryWithMutex(Long id){
+        // 尝试从Redis缓存中获取店铺信息的JSON字符串
+        String shopJson = stringRedisTemplate.opsForValue().get(CACHE_SHOP_KEY + id);
+        // 如果缓存中存在该店铺的JSON信息且不为空，则将其转换为Shop对象并返回
+        if (StrUtil.isNotBlank(shopJson)) {
+            return JSONUtil.toBean(shopJson, Shop.class);
+        }
+        // 如果缓存中存在该键但值为空字符串，表示之前已检查过数据库，直接返回null
+        if (shopJson != null) {
+            return null;
+        }
+        // 构造锁的键
+        String lockKey = LOCK_SHOP_KEY + id;
+        Shop shop = null;
+        try {
+            // 尝试获取互斥锁
+            boolean isLock = tryLock(lockKey);
+            // 如果未获取到锁，线程微睡眠后重试查询方法
+            if (!isLock) {
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                return queryWithMutex(id);
+            }
+            // 获取锁成功后，从数据库中查询店铺信息
+            shop = getById(id);
+            // 如果数据库中也不存在该店铺信息，将空值写入Redis并返回null
+            if (shop == null) {
+                stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id,"",CACHE_NULL_TTL,TimeUnit.MINUTES);
+                return null;
+            }
+            // 将数据库查询到的店铺信息写入Redis缓存
+            stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id,JSONUtil.toJsonStr(shop),CACHE_NULL_TTL,TimeUnit.MINUTES);
+        } catch (RuntimeException e) {
+            // 处理运行时异常
+            throw new RuntimeException(e);
+        } finally {
+            // 释放锁
+            unLock(lockKey);
+        }
+        return shop;
+    }
 }
