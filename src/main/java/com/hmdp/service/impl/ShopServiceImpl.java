@@ -9,6 +9,7 @@ import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.util.concurrent.TimeUnit;
@@ -68,6 +69,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
      * @return 更新操作的结果，包含操作是否成功的信息
      */
     @Override
+    @Transactional
     public Result update(Shop shop) {
         // 获取店铺ID
         Long id = shop.getId();
