@@ -8,9 +8,11 @@ import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,12 +24,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private ISeckillVoucherService seckillVoucherService;
+
     @Autowired
     private RedisIdWorker redisIdWorker;
 
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
     /**
      * 秒杀优惠券方法
-     *
+     * <p>
      * 该方法允许用户在指定的时间范围内秒杀特定的优惠券
      * 它会检查秒杀是否已经开始、是否已经结束以及库存是否充足
      * 如果所有检查都通过，它会尝试为当前用户创建一个优惠券订单
@@ -58,14 +64,25 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         // 获取当前用户ID
         Long userId = UserHolder.getUser().getId();
-        // 使用用户ID作为锁的对象，防止并发问题
-        synchronized (userId.toString().intern()) {
-            // 获取当前代理对象，用于调用切面方法
+        // 创建Redis锁对象，用于防止用户重复下单
+        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        // 尝试获取锁，参数1200L表示超时时间，单位为秒
+        boolean isLock = lock.tryLock(1200L);
+        // 如果未获取到锁，表示用户正在尝试重复下单
+        if (!isLock) {
+            return Result.fail("不允许重复下单");
+        }
+        try {
+            // 获取代理对象，用于调用切面方法
             IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
             // 调用切面方法创建优惠券订单
             return proxy.createVoucherOrder(voucherId);
+        } finally {
+            // 释放锁
+            lock.unlock();
         }
     }
+
 
 
     @Transactional
