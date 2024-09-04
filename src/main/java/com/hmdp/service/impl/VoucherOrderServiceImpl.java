@@ -8,10 +8,10 @@ import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.RedisIdWorker;
-import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,11 +25,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private ISeckillVoucherService seckillVoucherService;
 
-    @Autowired
+    @Resource
     private RedisIdWorker redisIdWorker;
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private RedissonClient redissonClient;
 
     /**
      * 秒杀优惠券方法
@@ -65,9 +68,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         // 获取当前用户ID
         Long userId = UserHolder.getUser().getId();
         // 创建Redis锁对象，用于防止用户重复下单
-        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
-        // 尝试获取锁，参数1200L表示超时时间，单位为秒
-        boolean isLock = lock.tryLock(1200L);
+        // SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+
+        RLock lock = redissonClient.getLock("lock:order:" + userId);
+
+        boolean isLock = lock.tryLock();
         // 如果未获取到锁，表示用户正在尝试重复下单
         if (!isLock) {
             return Result.fail("不允许重复下单");
@@ -107,7 +112,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 return Result.fail("库存不足！");
             }
 
-            // 7.创建订单
+            // 7.创建订单v
             VoucherOrder voucherOrder = new VoucherOrder();
             // 7.1.订单id
             long orderId = redisIdWorker.nextId("order");
